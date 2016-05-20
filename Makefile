@@ -178,6 +178,7 @@ UPROGS=\
 	_BCtime\
 	_BC_testgiduid\
 	_BC_ps\
+	_BC_setpriority\
 
 fs.img: mkfs README $(UPROGS)
 	./mkfs fs.img README $(UPROGS)

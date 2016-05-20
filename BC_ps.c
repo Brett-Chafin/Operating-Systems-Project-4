@@ -24,7 +24,8 @@ main (int argc, char * argv[])
 	printf(1, "gid: %d,  ", table[i].gid);
 	printf(1, "ppid: %d,  ", table[i].ppid);
 	printf(1, "size: %d,  ", table[i].size);
-	printf(1, "state: %s, \n", table[i].state);
+	printf(1, "state: %s, ", table[i].state);
+	printf(1, "priority: %d \n", table[i].priority);
     }
 
    exit();  

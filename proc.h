@@ -4,7 +4,9 @@
 #define FIRST_PROC_GID  0
 #define FIRST_PROC_UID  0
 
+
 int get_current_procs(int, struct uproc* table); //sys_getprocs helper prototype
+int modifypriority(int pid, int new_priority);   //sys_setpriority helper prototype
 // Per-CPU state
 struct cpu {
   uchar id;                    // Local APIC ID; index into cpus[] below
@@ -65,6 +67,8 @@ struct proc {
   int ppid;		       // Parent Process ID
   int uid; 		       // User ID
   int gid; 		       // Group ID    ************************ New code
+  int priority; 	       // either 0, 1, or 2
+  struct proc * next;          // points to the next item in the ready or free list
   struct proc *parent;         // Parent process
   struct trapframe *tf;        // Trap frame for current syscall
   struct context *context;     // swtch() here to run process

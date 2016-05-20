@@ -25,8 +25,10 @@ void
 acquire(struct spinlock *lk)
 {
   pushcli(); // disable interrupts to avoid deadlock.
-  if(holding(lk))
+  if(holding(lk)) {
+    cprintf("Lock name: %s\n", lk->name);
     panic("acquire");
+  }
 
   // The xchg is atomic.
   // It also serializes, so that reads after acquire are not
@@ -37,6 +39,7 @@ acquire(struct spinlock *lk)
   // Record info about lock acquisition for debugging.
   lk->cpu = cpu;
   getcallerpcs(&lk, lk->pcs);
+  
 }
 
 // Release the lock.
@@ -61,6 +64,7 @@ release(struct spinlock *lk)
   xchg(&lk->locked, 0);
 
   popcli();
+  
 }
 
 // Record the current call stack in pcs[] by following the %ebp chain.

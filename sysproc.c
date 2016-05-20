@@ -172,5 +172,29 @@ sys_getprocs(void)
   return procs_retrieved;
 }
 
+int 
+sys_setpriority(void) 
+{
+  int pid;
+  int new_priority;
+
+  if(argint(0, &pid) < 0) 
+    return -1;  
+   
+  if(argint(1, &new_priority) < 0) 
+    return -1;
+
+  cprintf("pid: %d, new_priority: %d \n", pid, new_priority);
+  
+  if(new_priority > 2 || new_priority < 0) {
+    cprintf("Invalid Priority!\n");
+    return -1;
+  }
+ 
+  //set priority helper
+  int rc = modifypriority(pid, new_priority);
+  return rc;
+}
+
 
 

@@ -8,9 +8,13 @@
 #include "spinlock.h"
 ;
 
+#define NEW_SCHEDS
 struct {
   struct spinlock lock;
   struct proc proc[NPROC];
+  struct proc * pReadyList[3];
+  struct proc * pFreeList;
+  uint   TimeToReset; 
 } ptable;
 
 static struct proc *initproc;
@@ -19,6 +23,24 @@ int nextpid = 1;
 extern void forkret(void);
 extern void trapret(void);
 
+
+#ifdef NEW_SCHEDS
+#define DEFAULT_PRIORITY 1
+#define NUM_QUEUES 3
+void addProcFreeList(struct proc * p); 
+void addProcReadyList(struct proc * p); //adds a process to the back of the ready list
+struct proc* getProcReadyList();
+struct proc* getProcFreeList();
+void printFreeList();
+void printReadyList();
+void initFreeList();
+void initReadyList();
+void getNumFreeList(); //print number of elements currently in the free list
+void updateQueue(int pid, int priority);
+void clockPriorityReset();
+void resetPriorities(); 
+void resetReadyQueues();
+#endif
 static void wakeup1(void *chan);
  
 
@@ -27,6 +49,64 @@ pinit(void)
 {
   initlock(&ptable.lock, "ptable");
 }
+
+#ifdef NEW_SCHEDS
+int modifypriority(int pid, int new_priority) 
+{
+  struct proc * p; 
+
+  acquire(&ptable.lock); //needed for reading the ptable
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->pid == pid) {
+      int oldPriority = p->priority;
+      p->priority = new_priority;
+      cprintf("Passing pid: %d, oldPriority: %d\n", pid, oldPriority);
+      updateQueue(pid, oldPriority);
+      release(&ptable.lock);
+      return 0;
+    }
+  }
+  release(&ptable.lock);
+  return -1; //proc to modify was not found
+}
+
+/*helper function for updating what Q a proc is in when its prioirty if modified*/
+void updateQueue(int pid, int priority) 
+{
+  struct proc * current = ptable.pReadyList[priority];
+  struct proc * prev    = ptable.pReadyList[priority];
+
+  //search the list looking for the desired process
+  while(current->pid != pid && current != 0) {
+    prev = current;
+    current = current->next;
+  }
+  if(current == 0) {
+    cprintf("UpdateQueue: proc not found\n");
+    addProcReadyList(current);
+    return;
+  }
+ 
+  //one node case
+  if(prev->next == 0) {
+    ptable.pReadyList[priority] = 0;
+  }
+
+  //if we find node in the middle of the list
+  if(current->next != 0) {
+    prev->next = current->next;  //append the list
+  }
+
+  //if we find our node at the beginning of a non empty list
+  if(current == prev) {
+    ptable.pReadyList[priority] = current->next;
+  }
+  
+  //add desired node to the correct queue
+  addProcReadyList(current);
+  return;
+}
+#endif
 
 //helper function for sys_getprocs
 int get_current_procs(int max, struct uproc* table) 
@@ -57,6 +137,7 @@ int get_current_procs(int max, struct uproc* table)
  	table[i].pid = p->pid;
 	table[i].ppid = p->ppid;
 	table[i].size = p->sz;
+        table[i].priority = p->priority;
 	++i;
 
 
@@ -95,14 +176,25 @@ allocproc(void)
   struct proc *p;
   char *sp;
 
+#ifdef NEW_SCHEDS
+  acquire(&ptable.lock);
+
+  //Get from Free List
+  p = getProcFreeList();
+  //if free list is empty
+  if(p == 0) {	
+    release(&ptable.lock); 
+    return 0;
+  }
+
+#else
   acquire(&ptable.lock);
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
     if(p->state == UNUSED)
       goto found;
   release(&ptable.lock);
   return 0;
-
-found:
+#endif
   p->state = EMBRYO;
   if(nextpid == 1) {
     p->ppid = nextpid;
@@ -121,6 +213,13 @@ found:
   // Allocate kernel stack.
   if((p->kstack = kalloc()) == 0){
     p->state = UNUSED;
+
+    #ifdef NEW_SCHEDS
+    acquire(&ptable.lock); 
+    addProcFreeList(p);
+    release(&ptable.lock);
+    #endif
+
     return 0;
   }
   sp = p->kstack + KSTACKSIZE;
@@ -149,7 +248,16 @@ userinit(void)
 {
   struct proc *p;
   extern char _binary_initcode_start[], _binary_initcode_size[];
+ 
+  //initialize free list
+  initFreeList();
   
+  //init ready list
+  initReadyList();
+  
+  //Cycles to reset procs to default priority 
+  ptable.TimeToReset = 5000000; //5 million   
+ 
   p = allocproc();
   initproc = p;
   if((p->pgdir = setupkvm()) == 0)
@@ -169,7 +277,250 @@ userinit(void)
   p->cwd = namei("/");
 
   p->state = RUNNABLE;
+  #ifdef NEW_SCHEDS
+  acquire(&ptable.lock);
+  p->priority = DEFAULT_PRIORITY;
+  addProcReadyList(p);
+  release(&ptable.lock);
+  #endif
 }
+
+//initialize free table **********************
+#ifdef NEW_SCHEDS
+
+/*returns the current number of free procs*/
+void getNumFreeList() {
+  int counter = 0;
+  struct proc * current = ptable.pFreeList; 
+  while(current->next != 0) { 
+    counter++;
+    current++;
+  }
+}
+
+
+/*adds proc to the front of the free list*/
+void addProcFreeList(struct proc * p) {
+  //cprintf("Adding to the free list\n");
+  
+  if(!holding(&ptable.lock))
+    panic("Not holding lock when adding to the free list\n");
+  
+  if(p->state != UNUSED)
+    panic("adding process that is not unused");
+  
+  //insert p to the beginning of the free list
+  p->next = ptable.pFreeList; 
+  ptable.pFreeList = p;
+  return;
+}
+
+/*Add procs to the front of the ready list*/
+void addProcReadyList(struct proc * p) {
+  if(p->state != RUNNABLE)
+    panic("Trying to add a non-runnable state to the ready list");
+
+  //cprintf("Adding proc %s to the ready list\n", p->name); 
+  if(!holding(&ptable.lock))
+    panic("Not holding lock when adding to ready list");
+
+  //Handles all cases 
+  p->next = ptable.pReadyList[p->priority];
+  ptable.pReadyList[p->priority] = p;
+  return; 
+}
+
+/*priority Q implementation*/ 
+struct proc* getProcReadyList() {
+  if(!holding(&ptable.lock))
+    panic("Not holding lock when adding to ready list");
+  
+  int i; 
+  for(i = 0; i < NUM_QUEUES; ++i) { 
+    struct proc * current = ptable.pReadyList[i];
+    struct proc * follow  = ptable.pReadyList[i];  
+
+    if(current == 0) continue; //if the current queue is empty 
+   
+ 
+  //traverse to the end of the list with the follow pointer
+    while(current->next != 0) {
+      follow = current;
+      current = current->next;
+    }
+    //delete current, the last proc in the list
+    if(follow->next == 0)
+      ptable.pReadyList[i] = 0;
+    else 
+      follow->next = 0;
+
+    if(current->state != RUNNABLE) {
+      panic("returning a proc that is not runnable!\n");
+    }
+    return current; //return the next proc to be ran 
+  }
+  return 0; //if we found nothing 
+}
+
+
+/*removes and returns the last proc in the ready list*/ 
+/*
+struct proc* getProcReadyList() {
+  if(!holding(&ptable.lock))
+    panic("Not holding lock when adding to ready list");
+ 
+  struct proc * current = ptable.pReadyList;
+  struct proc * follow  = ptable.pReadyList; 
+  if(current == 0) return 0; //if the list is empty 
+   
+ 
+  //traverse to the end of the list with the follow pointer
+  while(current->next != 0) {
+	follow = current;
+	current = current->next;
+  }
+  //delete current, the last proc in the list
+  if(follow->next == 0)
+    ptable.pReadyList = 0;
+  else 
+    follow->next = 0;
+
+  if(current->state != RUNNABLE) {
+    panic("returning a proc that is not runnable!\n");
+   }
+  return current; //return the next proc to be ran
+}
+*/
+
+/*removes and returns the first proc in the free list*/ 
+struct proc* getProcFreeList() {
+  if(!holding(&ptable.lock))
+    panic("Not holding lock when adding to ready list");
+
+   //get the first proc in the list
+   struct proc * current = ptable.pFreeList;
+   
+   //if list is empty
+   if(current == 0) return 0;
+ 
+   ptable.pFreeList = current->next;
+   if(current->state != UNUSED) 
+     panic("returning a free proc that is not unused!\n");
+   //printFreeList();
+   return current; 
+}
+
+
+/*initilizes the the free list to include all 64 procs*/ 
+void initFreeList() {
+  struct proc * p;
+  ptable.pFreeList = ptable.proc;
+  for(p = ptable.proc; p < &ptable.proc[NPROC - 1]; p++) {
+    p->next = (p + 1);
+  }
+  p->next = 0;
+}
+
+void initReadyList() {
+  int i;
+  for(i = 0; i < NUM_QUEUES; ++i) {
+    ptable.pReadyList[i] = 0;
+  }
+} 
+
+void printReadyList() {
+  int i; 
+  for(i = 0; i < NUM_QUEUES; ++i) {
+    struct proc * current = ptable.pReadyList[i];
+    if(current == 0) {
+      cprintf("Ready List[%d] is empty\n", i);
+      continue;
+    }
+    cprintf("\nReady List[%d] includes: ", i);
+    while(current != 0) {
+      cprintf("Proc: %s, ", current->name);
+      current = current->next;
+    }
+    cprintf(" end list\n");
+  }
+}
+
+void printFreeList() {
+  struct proc * current = ptable.pFreeList;
+  if(current == 0) {
+    cprintf("Free List is empty\n");
+    return;
+  }
+  cprintf("Free List includes: "); 
+  while(current != 0) {
+    cprintf("Proc: %s, ", current->name);
+    current = current->next;
+  }
+  cprintf(" end list\n");
+} 
+
+void clockPriorityReset() {
+
+  if(!holding(&ptable.lock)) 
+    panic("Not holding lock when resetting prioritys\n");
+  if(ptable.TimeToReset > 0){ 
+    ptable.TimeToReset -= 1;
+    return; 
+   }
+  cprintf("Resetting priorities!\n");
+  ptable.TimeToReset = 5000000; //5 million cycles ~= 5 seconds
+  resetPriorities(); 
+  resetReadyQueues();
+
+  return; 
+} 
+
+void resetPriorities() {
+  struct proc * p; 
+
+  if(!holding(&ptable.lock))
+    panic("Not holding lock when resetting the priorities!\n"); 
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if( p == 0) {
+      cprintf("error!\n");
+      return; //error
+      
+    }
+    enum procstate s = p->state;
+    if(s != RUNNABLE || s != SLEEPING || s != RUNNING)
+      continue;
+    proc->priority = DEFAULT_PRIORITY; 
+  }
+}
+
+void resetReadyQueues() {
+ if(!holding(&ptable.lock))
+    panic("Not holding lock when resetting the ready queues!\n");  
+
+  struct proc * p;
+  struct proc * temp;
+  int i; 
+
+  //loop through all queues
+  for(i = 0; i < NUM_QUEUES; ++i) {
+    
+    //skip default queue
+    if(i == DEFAULT_PRIORITY)
+      continue;
+    
+    //add all nodes on current list to default priority list
+    p = ptable.pReadyList[i]; 
+    while(p != 0) {
+      temp = p->next; 
+      addProcReadyList(p);
+      p = temp;
+    }
+    //delete the list
+    ptable.pReadyList[i] = 0;
+  }
+}
+
+#endif
 
 // Grow current process's memory by n bytes.
 // Return 0 on success, -1 on failure.
@@ -209,6 +560,12 @@ fork(void)
     kfree(np->kstack);
     np->kstack = 0;
     np->state = UNUSED;
+    #ifdef NEW_SCHEDS
+    acquire(&ptable.lock);
+    np->priority = DEFAULT_PRIORITY;
+    addProcFreeList(np);
+    release(&ptable.lock);
+    #endif
     return -1;
   }
   np->sz = proc->sz;
@@ -230,6 +587,10 @@ fork(void)
   // lock to force the compiler to emit the np->state write last.
   acquire(&ptable.lock);
   np->state = RUNNABLE;
+  #ifdef NEW_SCHEDS
+  np->priority = DEFAULT_PRIORITY;
+  addProcReadyList(np);
+  #endif
   release(&ptable.lock);
   
   return pid;
@@ -303,10 +664,13 @@ wait(void)
         p->kstack = 0;
         freevm(p->pgdir);
         p->state = UNUSED;
+	#ifdef NEW_SCHEDS
+ 	addProcFreeList(p);	//add the proc back to the free list to be reused
+        #endif
         p->pid = 0;
         p->parent = 0;
         p->name[0] = 0;
-        p->killed = 0;
+        p->killed = 0; 
         release(&ptable.lock);
         return pid;
       }
@@ -331,6 +695,43 @@ wait(void)
 //  - swtch to start running that process
 //  - eventually that process transfers control
 //      via swtch back to the scheduler.
+#ifdef NEW_SCHEDS
+//new scheduler
+void
+scheduler(void)
+{
+  struct proc *p;
+  for(;;){
+      // Enable interrupts on this processor.
+      sti();
+
+      acquire(&ptable.lock);
+      //cprintf("About to enter the getreadylist() function\n");
+      if((p = getProcReadyList()) != 0) {  
+      //cprintf("Coming out of the getreadylist() function\n");
+    
+      //if there is no processes on the ready list
+      // Switch to chosen process.  It is the process's job
+      // to release ptable.lock and then reacquire it
+      // before jumping back to us.
+     
+      proc = p;
+      switchuvm(p);
+      p->state = RUNNING;
+      swtch(&cpu->scheduler, proc->context);
+      switchkvm();
+
+      // Process is done running for now.
+      // It should have changed its p->state before coming back.
+      proc = 0;
+    }
+    clockPriorityReset();
+    release(&ptable.lock);
+  }
+}
+
+#else
+//old scheduler
 void
 scheduler(void)
 {
@@ -363,6 +764,7 @@ scheduler(void)
 
   }
 }
+#endif
 
 // Enter scheduler.  Must hold only ptable.lock
 // and have changed proc->state.
@@ -390,6 +792,7 @@ yield(void)
 {
   acquire(&ptable.lock);  //DOC: yieldlock
   proc->state = RUNNABLE;
+  addProcReadyList(proc);
   sched();
   release(&ptable.lock);
 }
@@ -461,8 +864,12 @@ wakeup1(void *chan)
   struct proc *p;
 
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
-    if(p->state == SLEEPING && p->chan == chan)
+    if(p->state == SLEEPING && p->chan == chan) {
       p->state = RUNNABLE;
+      #ifdef NEW_SCHEDS
+      addProcReadyList(p);
+      #endif
+   }
 }
 
 // Wake up all processes sleeping on chan.
@@ -487,8 +894,12 @@ kill(int pid)
     if(p->pid == pid){
       p->killed = 1;
       // Wake process from sleep if necessary.
-      if(p->state == SLEEPING)
+      if(p->state == SLEEPING) {
         p->state = RUNNABLE;
+	#ifdef NEW_SCHEDS
+        addProcReadyList(p); //add process to ready list
+        #endif
+      }
       release(&ptable.lock);
       return 0;
     }
@@ -516,7 +927,9 @@ procdump(void)
   struct proc *p;
   char *state;
   uint pc[10];
-  
+ 
+ 
+  printReadyList(); 
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
     if(p->state == UNUSED)
       continue;
@@ -524,7 +937,7 @@ procdump(void)
       state = states[p->state];
     else
       state = "???";
-    cprintf("Process name: %s, state:  %s, pid: %d, gid: %d, uid: %d \n ", p->name, state, p->pid, p->gid, p->uid);
+    cprintf("Process name: %s, state:  %s, pid: %d, gid: %d, uid: %d, priority: %d \n ", p->name, state, p->pid, p->gid, p->uid, p->priority);
     if(p->state == SLEEPING){
       getcallerpcs((uint*)p->context->ebp+2, pc);
       for(i=0; i<10 && pc[i] != 0; i++)

@@ -106,6 +106,7 @@ extern int sys_getppid(void);
 extern int sys_setuid(void);
 extern int sys_setgid(void);
 extern int sys_getprocs(void);
+extern int sys_setpriority(void);
 
 static int (*syscalls[])(void) = {
 [SYS_fork]    sys_fork,
@@ -137,6 +138,7 @@ static int (*syscalls[])(void) = {
 [SYS_setuid]  sys_setuid,
 [SYS_setgid]  sys_setgid,
 [SYS_getprocs] sys_getprocs,
+[SYS_setpriority] sys_setpriority,
 };
 
 char * sysCallNames[] = { 
